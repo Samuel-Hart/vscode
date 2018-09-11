@@ -39,17 +39,12 @@ declare namespace monaco {
 
 
 	export class Promise<T = any> {
-		constructor(
-			executor: (
-				resolve: (value: T | PromiseLike<T>) => void,
-				reject: (reason: any) => void) => void,
-			oncancel?: () => void);
+		constructor(executor: (resolve: (value: T | PromiseLike<T>) => void, reject: (reason: any) => void) => void);
 
 		public then<TResult1 = T, TResult2 = never>(
 			onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
 			onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null): Promise<TResult1 | TResult2>;
 
-		public cancel(): void;
 
 		public static as(value: null): Promise<null>;
 		public static as(value: undefined): Promise<undefined>;
@@ -4884,6 +4879,17 @@ declare namespace monaco.languages {
 		activeParameter: number;
 	}
 
+	export enum SignatureHelpTriggerReason {
+		Invoke = 1,
+		TriggerCharacter = 2,
+		Retrigger = 3
+	}
+
+	export interface SignatureHelpContext {
+		triggerReason: SignatureHelpTriggerReason;
+		triggerCharacter?: string;
+	}
+
 	/**
 	 * The signature help provider interface defines the contract between extensions and
 	 * the [parameter hints](https://code.visualstudio.com/docs/editor/intellisense)-feature.
@@ -4893,7 +4899,7 @@ declare namespace monaco.languages {
 		/**
 		 * Provide help for the signature at the given position and document.
 		 */
-		provideSignatureHelp(model: editor.ITextModel, position: Position, token: CancellationToken): ProviderResult<SignatureHelp>;
+		provideSignatureHelp(model: editor.ITextModel, position: Position, token: CancellationToken, context: SignatureHelpContext): ProviderResult<SignatureHelp>;
 	}
 
 	/**
@@ -5304,6 +5310,9 @@ declare namespace monaco.languages {
 
 	export interface WorkspaceEdit {
 		edits: Array<ResourceTextEdit | ResourceFileEdit>;
+	}
+
+	export interface Rejection {
 		rejectReason?: string;
 	}
 
@@ -5313,8 +5322,8 @@ declare namespace monaco.languages {
 	}
 
 	export interface RenameProvider {
-		provideRenameEdits(model: editor.ITextModel, position: Position, newName: string, token: CancellationToken): ProviderResult<WorkspaceEdit>;
-		resolveRenameLocation?(model: editor.ITextModel, position: Position, token: CancellationToken): ProviderResult<RenameLocation>;
+		provideRenameEdits(model: editor.ITextModel, position: Position, newName: string, token: CancellationToken): ProviderResult<WorkspaceEdit & Rejection>;
+		resolveRenameLocation?(model: editor.ITextModel, position: Position, token: CancellationToken): ProviderResult<RenameLocation & Rejection>;
 	}
 
 	export interface Command {

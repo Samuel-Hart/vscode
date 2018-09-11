@@ -9,14 +9,15 @@ import * as Proto from '../protocol';
 import * as PConst from '../protocol.const';
 import { ITypeScriptServiceClient } from '../typescriptService';
 import API from '../utils/api';
+import { nulToken } from '../utils/cancellation';
 import { applyCodeAction } from '../utils/codeAction';
 import { Command, CommandManager } from '../utils/commandManager';
+import { ConfigurationDependentRegistration } from '../utils/dependentRegistration';
+import { memoize } from '../utils/memoize';
 import * as Previewer from '../utils/previewer';
 import * as typeConverters from '../utils/typeConverters';
 import TypingsStatus from '../utils/typingsStatus';
 import FileConfigurationManager from './fileConfigurationManager';
-import { memoize } from '../utils/memoize';
-import { nulToken } from '../utils/cancellation';
 
 const localize = nls.loadMessageBundle();
 
@@ -235,29 +236,32 @@ class ApplyCompletionCodeActionCommand implements Command {
 interface CompletionConfiguration {
 	readonly useCodeSnippetsOnMethodSuggest: boolean;
 	readonly nameSuggestions: boolean;
-	readonly quickSuggestionsForPaths: boolean;
+	readonly pathSuggestions: boolean;
 	readonly autoImportSuggestions: boolean;
-	readonly typeScriptSuggestions: boolean;
 }
 
 namespace CompletionConfiguration {
 	export const useCodeSnippetsOnMethodSuggest = 'useCodeSnippetsOnMethodSuggest';
-	export const nameSuggestions = 'nameSuggestions';
-	export const quickSuggestionsForPaths = 'quickSuggestionsForPaths';
-	export const autoImportSuggestions = 'autoImportSuggestions.enabled';
-	export const typeScriptSuggestions = 'suggestions.enabled';
+	export const nameSuggestions = 'suggest.names';
+	export const nameSuggestions_deprecated = 'nameSuggestions';
+	export const pathSuggestions = 'suggest.paths';
+	export const autoImportSuggestions = 'suggest.autoImports';
+	export const autoImportSuggestions_deprecated = 'autoImportSuggestions.enabled';
 
 	export function getConfigurationForResource(
+		modeId: string,
 		resource: vscode.Uri
 	): CompletionConfiguration {
-		// TS settings are shared by both JS and TS.
+		const config = vscode.workspace.getConfiguration(modeId, resource);
+
+		// Deprecated TS settings that were shared by both JS and TS.
 		const typeScriptConfig = vscode.workspace.getConfiguration('typescript', resource);
+
 		return {
 			useCodeSnippetsOnMethodSuggest: typeScriptConfig.get<boolean>(CompletionConfiguration.useCodeSnippetsOnMethodSuggest, false),
-			quickSuggestionsForPaths: typeScriptConfig.get<boolean>(CompletionConfiguration.quickSuggestionsForPaths, true),
-			autoImportSuggestions: typeScriptConfig.get<boolean>(CompletionConfiguration.autoImportSuggestions, true),
-			typeScriptSuggestions: typeScriptConfig.get<boolean>(CompletionConfiguration.typeScriptSuggestions, true),
-			nameSuggestions: vscode.workspace.getConfiguration('javascript', resource).get(CompletionConfiguration.nameSuggestions, true)
+			pathSuggestions: config.get<boolean>(CompletionConfiguration.pathSuggestions, true),
+			autoImportSuggestions: config.get<boolean>(CompletionConfiguration.autoImportSuggestions, typeScriptConfig.get<boolean>(CompletionConfiguration.autoImportSuggestions_deprecated, true)),
+			nameSuggestions: config.get<boolean>(CompletionConfiguration.nameSuggestions, vscode.workspace.getConfiguration('javascript', resource).get(CompletionConfiguration.nameSuggestions_deprecated, true))
 		};
 	}
 }
@@ -268,6 +272,7 @@ class TypeScriptCompletionItemProvider implements vscode.CompletionItemProvider 
 
 	constructor(
 		private readonly client: ITypeScriptServiceClient,
+		private readonly modeId: string,
 		private readonly typingsStatus: TypingsStatus,
 		private readonly fileConfigurationManager: FileConfigurationManager,
 		commandManager: CommandManager
@@ -298,9 +303,9 @@ class TypeScriptCompletionItemProvider implements vscode.CompletionItemProvider 
 		}
 
 		const line = document.lineAt(position.line);
-		const completionConfiguration = CompletionConfiguration.getConfigurationForResource(document.uri);
+		const completionConfiguration = CompletionConfiguration.getConfigurationForResource(this.modeId, document.uri);
 
-		if (!this.shouldTrigger(context, completionConfiguration, line, position)) {
+		if (!this.shouldTrigger(context, line, position)) {
 			return null;
 		}
 
@@ -462,16 +467,11 @@ class TypeScriptCompletionItemProvider implements vscode.CompletionItemProvider 
 
 	private shouldTrigger(
 		context: vscode.CompletionContext,
-		config: CompletionConfiguration,
 		line: vscode.TextLine,
 		position: vscode.Position
 	): boolean {
 		if (context.triggerCharacter && !this.client.apiVersion.gte(API.v290)) {
 			if ((context.triggerCharacter === '"' || context.triggerCharacter === '\'')) {
-				if (!config.quickSuggestionsForPaths) {
-					return false;
-				}
-
 				// make sure we are in something that looks like the start of an import
 				const pre = line.text.slice(0, position.character);
 				if (!pre.match(/\b(from|import)\s*["']$/) && !pre.match(/\b(import|require)\(['"]$/)) {
@@ -480,10 +480,6 @@ class TypeScriptCompletionItemProvider implements vscode.CompletionItemProvider 
 			}
 
 			if (context.triggerCharacter === '/') {
-				if (!config.quickSuggestionsForPaths) {
-					return false;
-				}
-
 				// make sure we are in something that looks like an import path
 				const pre = line.text.slice(0, position.character);
 				if (!pre.match(/\b(from|import)\s*["'][^'"]*$/) && !pre.match(/\b(import|require)\(['"][^'"]*$/)) {
@@ -608,23 +604,23 @@ function shouldExcludeCompletionEntry(
 	completionConfiguration: CompletionConfiguration
 ) {
 	return (
-		// if TypeScript suggestions turned off, exclude every suggestion
-		!completionConfiguration.typeScriptSuggestions
-		|| (!completionConfiguration.nameSuggestions && element.kind === PConst.Kind.warning)
-		|| (!completionConfiguration.quickSuggestionsForPaths &&
-			(element.kind === PConst.Kind.directory || element.kind === PConst.Kind.script))
+		(!completionConfiguration.nameSuggestions && element.kind === PConst.Kind.warning)
+		|| (!completionConfiguration.pathSuggestions &&
+			(element.kind === PConst.Kind.directory || element.kind === PConst.Kind.script || element.kind === PConst.Kind.externalModuleName))
 		|| (!completionConfiguration.autoImportSuggestions && element.hasAction)
 	);
 }
 
 export function register(
 	selector: vscode.DocumentSelector,
+	modeId: string,
 	client: ITypeScriptServiceClient,
 	typingsStatus: TypingsStatus,
 	fileConfigurationManager: FileConfigurationManager,
 	commandManager: CommandManager,
 ) {
-	return vscode.languages.registerCompletionItemProvider(selector,
-		new TypeScriptCompletionItemProvider(client, typingsStatus, fileConfigurationManager, commandManager),
-		...TypeScriptCompletionItemProvider.triggerCharacters);
+	return new ConfigurationDependentRegistration(modeId, 'suggest.enabled', () =>
+		vscode.languages.registerCompletionItemProvider(selector,
+			new TypeScriptCompletionItemProvider(client, modeId, typingsStatus, fileConfigurationManager, commandManager),
+			...TypeScriptCompletionItemProvider.triggerCharacters));
 }
